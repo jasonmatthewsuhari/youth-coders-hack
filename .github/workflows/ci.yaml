@@ -1,0 +1,189 @@
+name: Build and Package App
+description: "Build the full-stack application and create a downloadable package."
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-package:
+    name: Build and Package Full-Stack App
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Setup Node.js for frontend
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      # Setup Python for backend
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      # Setup and compile requirements (like setup.bat does)
+      - name: Setup Python toolchain and compile requirements
+        run: |
+          # Upgrade pip toolchain & install pip-tools (matching setup.bat)
+          python -m pip install --upgrade pip setuptools wheel pip-tools
+          
+          # Compile requirements.in -> requirements.txt if requirements.in exists
+          if [ -f "requirements.in" ]; then
+            echo "Compiling requirements.in -> requirements.txt..."
+            python -m piptools compile requirements.in --resolver=backtracking
+          else
+            echo "No requirements.in found, skipping compilation"
+          fi
+          
+          # Install from requirements.txt if it exists
+          if [ -f "requirements.txt" ]; then
+            echo "Installing dependencies from requirements.txt..."
+            python -m piptools sync requirements.txt
+          else
+            echo "No requirements.txt found, skipping install"
+          fi
+
+      # Commit updated requirements.txt if it was compiled
+      - name: Commit compiled requirements
+        run: |
+          # Check if requirements.txt was modified
+          if git diff --quiet requirements.txt; then
+            echo "No changes to requirements.txt"
+          else
+            echo "Committing updated requirements.txt..."
+            git config --local user.email "action@github.com"
+            git config --local user.name "GitHub Action"
+            git add requirements.txt
+            git commit -m "Auto-compile requirements.txt from requirements.in [skip ci]" || echo "Nothing to commit"
+            git push || echo "Failed to push - this might be expected in PR workflows"
+          fi
+
+      # Build frontend
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      # Create deployment package
+      - name: Create deployment structure
+        run: |
+          mkdir -p deployment-package
+          
+          # Copy entire project structure
+          cp -r backend deployment-package/
+          cp -r frontend deployment-package/
+          cp -r data deployment-package/ 2>/dev/null || echo "No data directory found"
+          
+          # Copy root files
+          cp README.md deployment-package/ 2>/dev/null || echo "No README.md found"
+          cp .gitignore deployment-package/ 2>/dev/null || echo "No .gitignore found"
+          
+          # Create deployment instructions
+          cat > deployment-package/DEPLOYMENT.md << 'EOF'
+          # Deployment Instructions
+          
+          This package contains the complete full-stack application.
+          
+          ## Frontend (Next.js)
+          ```bash
+          cd frontend
+          npm install
+          npm run dev    # Development
+          npm run build  # Production build
+          npm start      # Production server
+          ```
+          
+          ## Backend (Python)
+          ```bash
+          cd backend
+          # Install dependencies (if requirements.txt exists)
+          pip install -r requirements.txt
+          
+          # Or if using poetry
+          poetry install
+          
+          # Run the application
+          python main.py
+          ```
+          
+          ## Environment Setup
+          1. Copy `.env.example` to `.env` (if it exists)
+          2. Configure your environment variables
+          3. Set up your database (if applicable)
+          
+          ## Notes
+          - Frontend runs on http://localhost:3000 by default
+          - Backend API endpoint should be configured in frontend environment
+          - Check individual README files in frontend/ and backend/ directories for specific instructions
+          EOF
+
+      # Remove unnecessary files from package
+      - name: Clean up package
+        run: |
+          # Remove node_modules and build artifacts that shouldn't be distributed
+          find deployment-package -name "node_modules" -type d -exec rm -rf {} + 2>/dev/null || true
+          find deployment-package -name ".next" -type d -exec rm -rf {} + 2>/dev/null || true
+          find deployment-package -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+          find deployment-package -name "*.pyc" -delete 2>/dev/null || true
+          find deployment-package -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
+          
+          # Remove package-lock.json as it will be regenerated
+          find deployment-package -name "package-lock.json" -delete 2>/dev/null || true
+
+      # Create ZIP archive
+      - name: Create ZIP package
+        run: |
+          cd deployment-package
+          zip -r ../hackathon-app-${{ github.sha }}.zip .
+          cd ..
+          
+          # Create info file
+          echo "Package created: hackathon-app-${{ github.sha }}.zip" > package-info.txt
+          echo "Created at: $(date)" >> package-info.txt
+          echo "Commit: ${{ github.sha }}" >> package-info.txt
+          echo "Branch: ${{ github.ref_name }}" >> package-info.txt
+
+      # Upload the complete package as artifact
+      - name: Upload Complete Application Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: hackathon-app-package
+          path: |
+            hackathon-app-${{ github.sha }}.zip
+            package-info.txt
+          retention-days: 30
+
+      # Summary
+      - name: Build Summary
+        run: |
+          echo "## 📦 Application Package Created" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Package:** \`hackathon-app-${{ github.sha }}.zip\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Includes:** Frontend, Backend, Documentation" >> $GITHUB_STEP_SUMMARY
+          echo "**Ready for:** Download and deployment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Package Contents:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`frontend/\` - Next.js application (built)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`backend/\` - Python backend" >> $GITHUB_STEP_SUMMARY
+          echo "- \`data/\` - Data files (if present)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`DEPLOYMENT.md\` - Setup instructions" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Download the artifact from this workflow run" >> $GITHUB_STEP_SUMMARY
+          echo "2. Extract the ZIP file" >> $GITHUB_STEP_SUMMARY
+          echo "3. Follow instructions in \`DEPLOYMENT.md\`" >> $GITHUB_STEP_SUMMARY
